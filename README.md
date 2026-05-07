@@ -329,12 +329,7 @@ ai-browser-agent-v2/
 
 ---
 
-## 🙏 Credits
 
-**Built by:** Dheemanth Muvva  
-**Institution:** Sri Ramachandra Institute, Chennai  
-**Project:** AP Government Internship  
-**Year:** 2026  
 
 **Technologies:**
 - [Ollama](https://ollama.ai/) - Local LLM runner
