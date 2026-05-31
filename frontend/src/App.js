@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import api from './services/api';
 import websocket from './services/websocket';
 import TaskInput from './components/TaskInput';
+import AgentBrain from './components/AgentBrain';
 import ApprovalPanel from './components/ApprovalPanel';
 import ActivityLog from './components/ActivityLog';
 import StatusBar from './components/StatusBar';
@@ -31,7 +32,6 @@ function App() {
   const [taskResults, setTaskResults] = useState(null);
   const [currentStep, setCurrentStep] = useState(0);
   const [totalSteps, setTotalSteps] = useState(0);
-  const [updatedSteps, setUpdatedSteps] = useState(null);
   const [currentTaskInput, setCurrentTaskInput] = useState('');
 
   useEffect(() => {
@@ -48,24 +48,39 @@ function App() {
     };
   }, []);
 
+  // Global Keyboard Shortcuts (Escape to close overlays/panels)
+  useEffect(() => {
+    const handleGlobalKeys = (e) => {
+      if (e.key === 'Escape') {
+        setShowHistory(false);
+        setShowFiles(false);
+        setShowSettings(false);
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeys);
+    return () => window.removeEventListener('keydown', handleGlobalKeys);
+  }, []);
+
   const handleWebSocketMessage = (data) => {
     // Live preview update
     if (data.type === 'livePreview' && data.screenshot) {
       setLiveScreenshot(data.screenshot);
+      // Fetch status immediately to sync URL
+      fetchStatus();
       return; // Don't add to activity log
     }
 
     // Alert/dialog detected
     if (data.type === 'alert') {
       setAlertData(data);
-      addLog({ type: 'warning', message: `⚠️ Browser dialog: ${data.alertText}`, timestamp: data.timestamp });
+      addLog({ type: 'warning', message: `Browser dialog: ${data.alertText}`, timestamp: data.timestamp });
       return;
     }
 
     // Steps updated with resolved selectors
     if (data.type === 'stepsUpdated' && data.steps) {
       setPendingSteps(data.steps);
-      addLog({ type: 'info', message: data.message || '🔍 Selectors resolved against live page', timestamp: data.timestamp });
+      addLog({ type: 'info', message: data.message || 'Selectors resolved against live page', timestamp: data.timestamp });
       return;
     }
 
@@ -78,6 +93,7 @@ function App() {
     // stepComplete — don't double-log
     if (data.type === 'stepComplete' && data.screenshot) {
       setLiveScreenshot(data.screenshot);
+      fetchStatus();
     }
 
     // Add to activity log
@@ -120,14 +136,14 @@ function App() {
         setTotalSteps(result.steps.length);
         addLog({
           type: 'info',
-          message: `🤖 AI generated ${result.steps.length} steps. Please review and approve.`,
+          message: `AI generated ${result.steps.length} steps. Please review and approve.`,
           timestamp: Date.now()
         });
       }
     } catch (error) {
       addLog({
         type: 'error',
-        message: '❌ ' + (error.response?.data?.error || 'Failed to analyze task'),
+        message: ' ' + (error.response?.data?.error || 'Failed to analyze task'),
         timestamp: Date.now()
       });
     } finally {
@@ -146,7 +162,7 @@ function App() {
         setTaskResults(result.results);
         addLog({
           type: 'success',
-          message: '🎉 All steps completed successfully!',
+          message: 'All steps completed successfully!',
           timestamp: Date.now()
         });
       } else if (result.errorStep !== undefined) {
@@ -163,7 +179,7 @@ function App() {
     } catch (error) {
       addLog({
         type: 'error',
-        message: '❌ Execution failed: ' + (error.response?.data?.details || error.message),
+        message: 'Execution failed: ' + (error.response?.data?.details || error.message),
         timestamp: Date.now()
       });
     } finally {
@@ -173,7 +189,7 @@ function App() {
 
   const handleReject = () => {
     setPendingSteps(null);
-    addLog({ type: 'info', message: '🚫 Task cancelled by user', timestamp: Date.now() });
+    addLog({ type: 'info', message: 'Task cancelled by user', timestamp: Date.now() });
   };
 
   const handleErrorDecision = async (decision) => {
@@ -189,23 +205,23 @@ function App() {
 
       if (result.success) {
         if (result.cancelled) {
-          addLog({ type: 'info', message: '🚫 Task cancelled', timestamp: Date.now() });
+          addLog({ type: 'info', message: 'Task cancelled', timestamp: Date.now() });
         } else if (result.skipped) {
-          addLog({ type: 'info', message: '⏭️ Step skipped', timestamp: Date.now() });
+          addLog({ type: 'info', message: 'Step skipped', timestamp: Date.now() });
         } else if (result.suggestion) {
           addLog({
             type: 'info',
-            message: `🤖 AI suggests selector: ${result.suggestion.suggestion}`,
+            message: `AI suggests selector: ${result.suggestion.suggestion}`,
             timestamp: Date.now()
           });
         } else {
-          addLog({ type: 'success', message: '✅ Action completed', timestamp: Date.now() });
+          addLog({ type: 'success', message: 'Action completed', timestamp: Date.now() });
         }
       }
     } catch (error) {
       addLog({
         type: 'error',
-        message: '❌ ' + (error.response?.data?.error || 'Action failed'),
+        message: ' ' + (error.response?.data?.error || 'Action failed'),
         timestamp: Date.now()
       });
     }
@@ -218,7 +234,7 @@ function App() {
       await api.stopBrowser();
       setLiveScreenshot(null);
       setIsExecuting(false);
-      addLog({ type: 'info', message: '🛑 Browser stopped', timestamp: Date.now() });
+      addLog({ type: 'info', message: 'Browser stopped', timestamp: Date.now() });
     } catch (err) {
       console.error('Stop browser failed:', err);
     }
@@ -239,11 +255,31 @@ function App() {
         </div>
         <div className="header-right">
           {isExecuting && (
-            <button className="header-btn danger-btn" onClick={handleStopBrowser}>🛑 Stop</button>
+            <button className="header-btn danger-btn" onClick={handleStopBrowser}>
+              <span className="live-dot" style={{width: '6px', height: '6px', background: '#ff8a8a', boxShadow: '0 0 6px #ff8a8a', animation: 'none'}}></span>
+              Stop
+            </button>
           )}
-          <button className="header-btn" onClick={() => setShowHistory(!showHistory)}>🗂️ History</button>
-          <button className="header-btn" onClick={() => setShowFiles(!showFiles)}>📁 Files</button>
-          <button className="header-btn" onClick={() => setShowSettings(!showSettings)}>⚙️ Settings</button>
+          <button className="header-btn" onClick={() => setShowHistory(!showHistory)}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{marginRight: '6px'}}>
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+              <polyline points="14 2 14 8 20 8"></polyline>
+            </svg>
+            History
+          </button>
+          <button className="header-btn" onClick={() => setShowFiles(!showFiles)}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{marginRight: '6px'}}>
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+            </svg>
+            Files
+          </button>
+          <button className="header-btn" onClick={() => setShowSettings(!showSettings)}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{marginRight: '6px'}}>
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
+            Settings
+          </button>
         </div>
       </header>
 
@@ -260,13 +296,13 @@ function App() {
       {showFiles && (
         <div className="files-panel-overlay" onClick={() => setShowFiles(false)}>
           <div className="files-panel-modal" onClick={e => e.stopPropagation()}>
-            <div className="files-panel-header">
-              <h3>📁 File Manager</h3>
+            <div className="files-panel-header" style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px'}}>
+              <h3 style={{fontFamily: 'Space Grotesk, sans-serif', fontWeight: 600}}>File Manager</h3>
               <button className="close-btn" onClick={() => setShowFiles(false)}>✕</button>
             </div>
             <FileUploader onFileUploaded={(f) => addLog({
               type: 'info',
-              message: `📄 File uploaded: ${f.name}`,
+              message: `File uploaded: ${f.name}`,
               timestamp: Date.now()
             })} />
           </div>
@@ -292,6 +328,9 @@ function App() {
               isExecuting={isExecuting}
               mode={mode}
             />
+
+            {/* AI thinking visualizer */}
+            <AgentBrain isExecuting={isExecuting && !pendingSteps} />
 
             <div className="templates-toggle">
               <button
@@ -345,6 +384,7 @@ function App() {
             isExecuting={isExecuting}
             currentStep={currentStep}
             totalSteps={totalSteps}
+            url={status?.browser?.currentUrl}
           />
         </div>
       </div>
