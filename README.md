@@ -2,7 +2,7 @@
 
 **A powerful browser automation tool powered by Ollama (local LLM) and Puppeteer**
 
-Built for AP Government Internship Project | Chennai, 2026
+
 
 ---
 
