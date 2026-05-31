@@ -1,9 +1,11 @@
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const config = require('./config/config');
 const Logger = require('./utils/logger');
+const broadcaster = require('./services/broadcaster');
 
 // Initialize Express app
 const app = express();
@@ -11,6 +13,10 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 // Middleware
+app.use(helmet({
+  contentSecurityPolicy: false, // Disabled to allow WebSocket connections
+  crossOriginEmbedderPolicy: false
+}));
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
@@ -42,6 +48,9 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Initialize broadcaster with WebSocket server
+broadcaster.init(wss);
+
 // WebSocket connection handling
 wss.on('connection', (ws) => {
   Logger.info('WebSocket client connected');
@@ -63,28 +72,12 @@ wss.on('connection', (ws) => {
     Logger.error('WebSocket error:', error.message);
   });
 
-  // Send welcome message
   ws.send(JSON.stringify({
     type: 'connected',
     message: 'Connected to AI Browser Agent',
     timestamp: Date.now()
   }));
 });
-
-// Global broadcast function for WebSocket
-global.broadcast = (data) => {
-  const message = JSON.stringify(data);
-  
-  wss.clients.forEach((client) => {
-    if (client.readyState === 1) { // OPEN
-      try {
-        client.send(message);
-      } catch (error) {
-        Logger.error('Broadcast error:', error.message);
-      }
-    }
-  });
-};
 
 // Error handling middleware
 app.use((err, req, res, next) => {

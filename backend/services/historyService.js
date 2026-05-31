@@ -1,8 +1,9 @@
 const Database = require('better-sqlite3');
 const path = require('path');
+const config = require('../config/config');
 const Logger = require('../utils/logger');
 
-const DB_PATH = path.resolve('./history.db');
+const DB_PATH = path.resolve(config.db.path);
 
 class HistoryService {
   constructor() {

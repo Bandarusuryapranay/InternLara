@@ -7,6 +7,7 @@ class OllamaService {
   constructor() {
     this.baseUrl = config.ollama.baseUrl;
     this.model = config.ollama.model;
+    this.visionModel = config.ollama.visionModel;
   }
 
   /**
@@ -23,12 +24,14 @@ User request: "${userInput}"
 Available actions:
 - navigate: Go to a URL (use "target" field for the URL)
 - click: Click an element (use "selector" field, AND "description" for what to click)
-- type: Type text into an input (use "selector" AND "description" AND "value")
+- type: Type text into an input (use "selector", "description", AND "value").
+  CRITICAL: If you are entering a search query or a field that needs to be submitted immediately (like a Google search field or the final field of a login form), append a newline character "\\n" to the end of the "value" string (e.g. "artificial intelligence\\n" or "mypassword\\n"). This tells the browser to press the Enter key right after typing to execute search or submit.
 - scrape: Extract text from page (use "selector" if specific element, leave blank for full page)
 - screenshot: Take a screenshot (no extra fields needed)
 - wait: Wait for an element to appear (use "selector" AND "description")
 - scroll: Scroll the page (use "value": "up" or "down")
 - upload: Upload a file (use "selector" for file input, "value" for file path)
+- get_emails: Read emails from Gmail inbox (no selector needed — automatically detects Gmail's email list). Use ONLY when the user asks to check/read/see emails.
 
 IMPORTANT: For every "click", "type", and "wait" step, always include BOTH:
 1. "selector": your best guess CSS selector
@@ -45,14 +48,11 @@ Return ONLY a valid JSON array (no markdown, no explanation):
     "action": "type",
     "selector": "input[name='q']",
     "description": "search input box",
-    "value": "search term",
-    "description": "Type search query into the search box"
+    "value": "search term\\n"
   },
   {
-    "action": "click",
-    "selector": "button[type='submit']",
-    "description": "search submit button",
-    "description": "Click the search button"
+    "action": "screenshot",
+    "description": "Take a screenshot of the search results"
   }
 ]
 
@@ -294,6 +294,133 @@ Return ONLY a valid JSON object (no markdown):
   }
 
   /**
+   * Fallback intent parser using regex patterns.
+   * Used when Ollama is unavailable — handles common task patterns.
+   */
+  fallbackParseIntent(userInput) {
+    Logger.info('Using regex fallback parser for:', userInput);
+    const input = userInput.toLowerCase().trim();
+    const steps = [];
+
+    // Navigate to URL pattern
+    const urlMatch = input.match(/(?:go\s+to|navigate\s+to|open|visit)\s+(https?:\/\/[^\s]+)/i);
+    if (urlMatch) {
+      steps.push({
+        action: 'navigate',
+        target: urlMatch[1],
+        description: `Navigate to ${urlMatch[1]}`
+      });
+    } else {
+      // Try domain-only pattern
+      const domainMatch = input.match(/(?:go\s+to|navigate\s+to|open|visit)\s+([a-z0-9.-]+\.[a-z]{2,})/i);
+      if (domainMatch) {
+        steps.push({
+          action: 'navigate',
+          target: `https://${domainMatch[1]}`,
+          description: `Navigate to ${domainMatch[1]}`
+        });
+      }
+    }
+
+    // Search pattern
+    const searchMatch = input.match(/(?:search\s+(?:for\s+)?|find\s+)(.+?)(?:\s+and|\s+then|\s+on\s+\S+|\s*$)/i);
+    if (searchMatch) {
+      const query = searchMatch[1].trim();
+      const site = input.match(/(?:on|at)\s+([a-z0-9.-]+\.[a-z]{2,})/i);
+      if (site) {
+        steps.push({
+          action: 'navigate',
+          target: `https://${site[1]}`,
+          description: `Go to ${site[1]}`
+        });
+      }
+
+      if (!site && steps.length === 0) {
+        // Default to Google search
+        steps.push({
+          action: 'navigate',
+          target: `https://www.google.com/search?q=${encodeURIComponent(query)}`,
+          description: `Search for ${query}`
+        });
+      } else {
+        steps.push({
+          action: 'type',
+          selector: 'input[type="search"], input[name="q"]',
+          description: 'Search input',
+          value: `${query}\n`
+        });
+      }
+    }
+
+    // Click pattern
+    const clickMatch = input.match(/(?:click|press|tap)\s+(?:on\s+)?(?:the\s+)?[""']?([^""']+)[""']?(?:\s+button|\s+link|\s+result)?/i);
+    if (clickMatch) {
+      steps.push({
+        action: 'click',
+        selector: null,
+        description: `Click ${clickMatch[1].trim()}`
+      });
+    }
+
+    // Screenshot pattern
+    if (input.includes('screenshot') || input.includes('capture') || input.includes('snapshot')) {
+      const fullPage = input.includes('full') || input.includes('entire') || input.includes('whole');
+      steps.push({
+        action: 'screenshot',
+        description: fullPage ? 'Take a full-page screenshot' : 'Take a screenshot'
+      });
+    }
+
+    // Scroll pattern
+    if (input.includes('scroll')) {
+      const direction = input.includes('up') ? 'up' : 'down';
+      steps.push({
+        action: 'scroll',
+        value: direction,
+        description: `Scroll ${direction}`
+      });
+    }
+
+    // Scrape pattern
+    if (input.includes('scrape') || input.includes('extract') || input.includes('read') || input.includes('list')) {
+      steps.push({
+        action: 'scrape',
+        selector: null,
+        description: 'Extract content from page'
+      });
+    }
+
+    // Wait pattern
+    const waitMatch = input.match(/wait\s+(\d+)\s*(?:seconds?|s|ms)?/i);
+    if (waitMatch) {
+      const ms = parseInt(waitMatch[1]) * (input.includes('ms') ? 1 : 1000);
+      steps.push({
+        action: 'wait',
+        selector: null,
+        description: `Wait ${waitMatch[1]} ${input.includes('ms') ? 'ms' : 'seconds'}`
+      });
+    }
+
+    if (steps.length === 0) {
+      throw new Error('Could not understand the task. Try: "Go to google.com and search for react"');
+    }
+
+    return steps;
+  }
+
+  /**
+   * Check if Ollama is available
+   */
+  async isAvailable() {
+    try {
+      const health = await this.checkHealth();
+      return health.status === 'healthy';
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Extract JSON from LLM response (handles markdown code blocks)
    */
   extractJSON(text) {
@@ -312,6 +439,65 @@ Return ONLY a valid JSON object (no markdown):
   }
 
   /**
+   * Analyze a screenshot using Ollama vision model.
+   * Returns element position / action suggestion from visual analysis.
+   */
+  async analyzeScreenshotWithVision(screenshotBase64, goal) {
+    Logger.info('Analyzing screenshot with vision model for:', goal);
+
+    const prompt = `You are an AI that analyzes webpage screenshots to help automate browser actions.
+
+Given this screenshot of a webpage, find the element that best matches this description: "${goal}"
+
+Return ONLY valid JSON (no markdown):
+{
+  "found": true/false,
+  "elementType": "button|input|link|text|other",
+  "selector": "best CSS selector for the element (if identifiable)",
+  "coordinates": { "x": 123, "y": 456 },
+  "reasoning": "brief explanation"
+}
+
+If you can see the element, provide its approximate center coordinates and a CSS selector.
+If you cannot find it, set "found": false.`;
+
+    try {
+      const response = await axios.post(`${this.baseUrl}/api/generate`, {
+        model: this.visionModel,
+        prompt: prompt,
+        images: [screenshotBase64],
+        stream: false,
+        options: {
+          temperature: 0.1
+        }
+      });
+
+      const text = response.data.response;
+      Logger.debug('Vision model response:', text);
+
+      const result = this.extractJSON(text);
+      return result || { found: false, reason: 'Failed to parse vision response' };
+
+    } catch (error) {
+      Logger.error('Vision analysis failed:', error.message);
+      return { found: false, reason: error.message };
+    }
+  }
+
+  /**
+   * Check if vision model is available
+   */
+  async isVisionAvailable() {
+    try {
+      const tags = await axios.get(`${this.baseUrl}/api/tags`);
+      const models = tags.data.models || [];
+      return models.some(m => m.name.includes('vision') || m.name.includes('llava'));
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Check Ollama health
    */
   async checkHealth() {
@@ -320,11 +506,15 @@ Return ONLY a valid JSON object (no markdown):
       const models = response.data.models || [];
       const hasModel = models.some(m => m.name.includes(this.model));
 
+      const hasVisionModel = models.some(m => m.name.includes('vision') || m.name.includes('llava'));
+
       return {
         status: 'healthy',
         models: models.map(m => m.name),
         currentModel: this.model,
-        modelAvailable: hasModel
+        modelAvailable: hasModel,
+        visionModel: this.visionModel,
+        visionAvailable: hasVisionModel
       };
     } catch (error) {
       Logger.error('Ollama health check failed:', error.message);

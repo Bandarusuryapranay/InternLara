@@ -33,6 +33,7 @@ function App() {
   const [currentStep, setCurrentStep] = useState(0);
   const [totalSteps, setTotalSteps] = useState(0);
   const [currentTaskInput, setCurrentTaskInput] = useState('');
+  const [waitingForUser, setWaitingForUser] = useState(false);
 
   useEffect(() => {
     websocket.connect();
@@ -84,6 +85,20 @@ function App() {
       return;
     }
 
+    // 2FA / Manual action required
+    if (data.type === 'userActionRequired') {
+      setWaitingForUser(true);
+      addLog({ type: 'warning', message: data.message || 'Manual action required in browser', timestamp: data.timestamp });
+      return;
+    }
+
+    // User action resolved
+    if (data.type === 'userActionResolved') {
+      setWaitingForUser(false);
+      addLog({ type: 'success', message: data.message || 'Continuing execution', timestamp: data.timestamp });
+      return;
+    }
+
     // Step progress tracking
     if (data.type === 'step') {
       setCurrentStep(data.stepNumber || 0);
@@ -113,8 +128,21 @@ function App() {
     try {
       const statusData = await api.getStatus();
       setStatus(statusData);
+      if (statusData.browser?.waitingForUser !== undefined) {
+        setWaitingForUser(statusData.browser.waitingForUser);
+      }
     } catch (error) {
       console.error('Failed to fetch status:', error);
+    }
+  };
+
+  const handleContinue = async () => {
+    try {
+      setWaitingForUser(false);
+      await api.continueAfterUserAction();
+      addLog({ type: 'info', message: 'Continuing execution...', timestamp: Date.now() });
+    } catch (err) {
+      console.error('Continue failed:', err);
     }
   };
 
@@ -197,7 +225,7 @@ function App() {
       const result = await api.handleRetryDecision(
         decision,
         errorDialog.step,
-        { error: errorDialog.error },
+        { error: errorDialog.error, mode, taskInput: currentTaskInput },
         errorDialog.remainingSteps
       );
 
@@ -206,8 +234,17 @@ function App() {
       if (result.success) {
         if (result.cancelled) {
           addLog({ type: 'info', message: 'Task cancelled', timestamp: Date.now() });
-        } else if (result.skipped) {
-          addLog({ type: 'info', message: 'Step skipped', timestamp: Date.now() });
+          setIsExecuting(false);
+          setTaskResults(errorDialog.context?.partialResults || []);
+        } else if (result.results) {
+          // Continued execution completed all remaining steps
+          setTaskResults(result.results);
+          setIsExecuting(false);
+          addLog({
+            type: 'success',
+            message: 'All remaining steps completed successfully!',
+            timestamp: Date.now()
+          });
         } else if (result.suggestion) {
           addLog({
             type: 'info',
@@ -217,6 +254,17 @@ function App() {
         } else {
           addLog({ type: 'success', message: 'Action completed', timestamp: Date.now() });
         }
+      } else if (result.errorStep !== undefined) {
+        // Another error during continued execution — show dialog again
+        setErrorDialog({
+          errorStep: result.errorStep,
+          step: result.remainingSteps?.[0],
+          options: result.options,
+          error: result.partialResults?.[result.partialResults.length - 1]?.error,
+          context: result,
+          remainingSteps: result.remainingSteps
+        });
+        setTaskResults(prev => [...(prev || []), ...(result.partialResults || [])]);
       }
     } catch (error) {
       addLog({
@@ -316,7 +364,7 @@ function App() {
       )}
 
       {/* Status Bar */}
-      <StatusBar status={status} onRefresh={fetchStatus} />
+      <StatusBar status={status} onRefresh={fetchStatus} onContinue={handleContinue} isWaitingForUser={waitingForUser} visionAvailable={status.ollama?.visionAvailable} />
 
       {/* Two-column Main Layout */}
       <div className="app-layout">

@@ -1,9 +1,18 @@
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const { PuppeteerBlocker } = require('@cliqz/adblocker-puppeteer');
+const fetch = require('cross-fetch');
 const config = require('../config/config');
+const broadcaster = require('./broadcaster');
 const Logger = require('../utils/logger');
 const { retryWithBackoff } = require('../utils/retry');
 const { extractPageContext, findBestSelector, validateSelector } = require('../utils/elementFinder');
 const path = require('path');
+const fs = require('fs');
+
+puppeteer.use(StealthPlugin());
+
+const COOKIES_PATH = path.resolve('./session_cookies.json');
 
 class BrowserService {
   constructor() {
@@ -11,19 +20,22 @@ class BrowserService {
     this.page = null;
     this.isRunning = false;
     this.downloads = [];
-    this.lastScreenshot = null; // Cache for live preview
+    this.lastScreenshot = null;
+    this._pendingDialog = null;
+    this._dialogTimeout = null;
+    this._blocker = null;
+    this._waitingForUserAction = false;
+    this._userActionResolve = null;
+    this._userActionReject = null;
   }
 
-  /**
-   * Initialize browser
-   */
   async initialize() {
     if (this.browser && this.isRunning) {
       Logger.debug('Browser already initialized');
       return;
     }
 
-    Logger.info('Initializing browser...');
+    Logger.info('Initializing browser with stealth protection...');
 
     this.browser = await puppeteer.launch({
       headless: config.browser.headless,
@@ -32,7 +44,14 @@ class BrowserService {
         '--disable-setuid-sandbox',
         '--disable-blink-features=AutomationControlled',
         '--disable-features=IsolateOrigins',
-        '--disable-site-isolation-trials'
+        '--disable-site-isolation-trials',
+        '--disable-web-security',
+        '--disable-features=BlockInsecurePrivateNetworkRequests',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--disable-infobars',
+        '--window-size=1280,720'
       ],
       defaultViewport: {
         width: config.browser.width,
@@ -41,37 +60,112 @@ class BrowserService {
     });
 
     this.page = await this.browser.newPage();
+    await this.randomizeFingerprint();
+    await this.setupAdblocker();
+    await this.setupDialogHandler();
+    await this.restoreCookies();
 
-    await this.page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    );
-
-    // Setup download tracking
     const client = await this.page.target().createCDPSession();
     await client.send('Page.setDownloadBehavior', {
       behavior: 'allow',
       downloadPath: path.resolve(config.upload.directory)
     });
 
-    // Listen for dialogs (alerts, confirms, prompts)
+    this.isRunning = true;
+    Logger.success('Browser initialized with stealth protection');
+  }
+
+  async randomizeFingerprint() {
+    const userAgents = [
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+    ];
+    const ua = userAgents[Math.floor(Math.random() * userAgents.length)];
+    await this.page.setUserAgent(ua);
+
+    await this.page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+    });
+
+    await this.page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9'
+    });
+  }
+
+  async setupAdblocker() {
+    try {
+      this._blocker = await PuppeteerBlocker.fromPrebuiltAdsAndTracking(fetch);
+      if (this._blocker) {
+        await this._blocker.enableBlockingInPage(this.page);
+        Logger.info('Adblocker enabled');
+      }
+    } catch (err) {
+      Logger.warn('Adblocker setup failed (non-critical):', err.message);
+    }
+  }
+
+  async setupDialogHandler() {
     this.page.on('dialog', async dialog => {
       Logger.info('Dialog detected:', dialog.type(), '-', dialog.message());
+
+      if (this._dialogTimeout) {
+        clearTimeout(this._dialogTimeout);
+      }
+
       this.broadcast('alert', {
         alertType: dialog.type(),
         alertText: dialog.message(),
         timestamp: Date.now()
       });
-      // Store dialog for later handling
-      this._pendingDialog = dialog;
-    });
 
-    this.isRunning = true;
-    Logger.success('Browser initialized successfully');
+      this._pendingDialog = dialog;
+
+      this._dialogTimeout = setTimeout(async () => {
+        if (this._pendingDialog) {
+          Logger.warn('Dialog auto-dismissed after timeout');
+          try {
+            await this._pendingDialog.dismiss();
+          } catch (e) { }
+          this._pendingDialog = null;
+          this.broadcast('alertAutoDismissed', {
+            message: 'Dialog auto-dismissed due to timeout'
+          });
+        }
+      }, config.dialog.autoDismissTimeout);
+    });
   }
 
-  /**
-   * Navigate to URL and capture page context
-   */
+  async saveCookies() {
+    try {
+      if (!this.page) return;
+      const cookies = await this.page.cookies();
+      fs.writeFileSync(COOKIES_PATH, JSON.stringify(cookies, null, 2));
+      Logger.info(`Saved ${cookies.length} session cookies`);
+    } catch (err) {
+      Logger.warn('Failed to save cookies:', err.message);
+    }
+  }
+
+  async restoreCookies() {
+    try {
+      if (!fs.existsSync(COOKIES_PATH)) {
+        Logger.info('No saved session found — will need fresh login');
+        return;
+      }
+      const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf8'));
+      if (!Array.isArray(cookies) || cookies.length === 0) return;
+
+      await this.page.setCookie(...cookies);
+      Logger.info(`Restored ${cookies.length} session cookies`);
+      this.broadcast('status', { message: `✅ Session restored (${cookies.length} cookies loaded)` });
+    } catch (err) {
+      Logger.warn('Failed to restore cookies:', err.message);
+    }
+  }
+
   async navigate(url) {
     await this.ensureInitialized();
 
@@ -83,15 +177,28 @@ class BrowserService {
       message: `Navigating to ${url}`
     });
 
-    await this.page.goto(url, {
-      waitUntil: 'networkidle2',
-      timeout: 30000
-    });
+    try {
+      await this.page.goto(url, {
+        waitUntil: 'networkidle2',
+        timeout: 30000
+      });
+    } catch (err) {
+      Logger.warn('Navigation timeout/page error (continuing):', err.message);
+    }
 
-    // Wait a little for dynamic content
-    await this.sleep(1000);
+    await this.sleep(1500);
 
-    // Auto-capture screenshot and page context after navigation
+    if (await this.is2FAPage()) {
+      Logger.info('2FA page detected — pausing for manual user action');
+      this.broadcast('status', {
+        message: '🔐 2FA detected. Please complete verification in the browser window, then click Continue in the app.'
+      });
+      this._waitingForUserAction = true;
+      await this.waitForUserAction();
+      this._waitingForUserAction = false;
+      await this.sleep(1000);
+    }
+
     const screenshot = await this.captureAndBroadcastScreenshot();
     const pageContext = await extractPageContext(this.page);
 
@@ -107,12 +214,87 @@ class BrowserService {
     };
   }
 
-  /**
-   * SMART Click — tries resolved selector first, then fuzzy search fallbacks
-   */
+  async isLoginPage() {
+    if (!this.page) return false;
+    try {
+      return await this.page.evaluate(() => {
+        const url = window.location.href.toLowerCase();
+        const title = document.title.toLowerCase();
+        if (url.includes('accounts.google.com') || url.includes('signin') || url.includes('login') || url.includes('auth')) return true;
+        const headers = document.querySelectorAll('h1, h2, h3, span');
+        for (const h of headers) {
+          const t = (h.textContent || '').toLowerCase();
+          if (t.includes('sign in') || t.includes('signin') || t.includes('log in')) return true;
+        }
+        return false;
+      });
+    } catch { return false; }
+  }
+
+  async is2FAPage() {
+    if (!this.page) return false;
+    try {
+      return await this.page.evaluate(() => {
+        const url = window.location.href.toLowerCase();
+        if (url.includes('challenge') || url.includes('2fa') || url.includes('two-factor') || url.includes('verification') || url.includes('authenticator') || url.includes('otp')) return true;
+        const body = document.body.innerText.toLowerCase();
+        const keywords = ['verification code', 'enter the code', 'two-factor', 'authenticator', 'confirm it\'s you', 'phone number', 'get a verification'];
+        return keywords.some(k => body.includes(k));
+      });
+    } catch { return false; }
+  }
+
+  async waitForUserAction() {
+    Logger.info('Waiting for manual user action (timeout: 120s)...');
+
+    this._waitingForUserAction = true;
+
+    this.broadcast('userActionRequired', {
+      message: '🔐 2FA or login action required. Complete it in the browser, then click Continue.'
+    });
+
+    this.broadcast('status', {
+      message: '🔐 2FA or login action required. Complete it in the browser, then click Continue.'
+    });
+
+    // Create a promise that resolves when user clicks "Continue"
+    return new Promise((resolve, reject) => {
+      this._userActionResolve = resolve;
+      this._userActionReject = reject;
+
+      // Auto-timeout after 120s
+      setTimeout(() => {
+        if (this._waitingForUserAction) {
+          Logger.warn('User action wait timed out');
+          this._waitingForUserAction = false;
+          this._userActionResolve = null;
+          this.broadcast('status', {
+            message: '⏰ Wait timed out. Continuing anyway...'
+          });
+          resolve();
+        }
+      }, 120000);
+    });
+  }
+
+  resolveUserAction() {
+    Logger.info('User clicked Continue — resuming execution');
+    this._waitingForUserAction = false;
+    if (this._userActionResolve) {
+      this.broadcast('userActionResolved', {
+        message: 'Continuing execution...'
+      });
+      this._userActionResolve();
+      this._userActionResolve = null;
+    }
+  }
+
+  isWaitingForUser() {
+    return this._waitingForUserAction;
+  }
+
   async click(selector, description = null) {
     await this.ensureInitialized();
-
     Logger.info('Clicking:', selector || description);
 
     this.broadcast('action', {
@@ -121,7 +303,6 @@ class BrowserService {
       message: `Clicking: ${description || selector}`
     });
 
-    // Try the provided selector first
     let resolvedSelector = selector;
     if (selector) {
       const valid = await validateSelector(this.page, selector);
@@ -131,7 +312,6 @@ class BrowserService {
       }
     }
 
-    // Fallback: fuzzy search by description
     if (!resolvedSelector && description) {
       resolvedSelector = await findBestSelector(this.page, description, 'any');
       if (resolvedSelector) {
@@ -139,7 +319,6 @@ class BrowserService {
       }
     }
 
-    // Fallback: try common search button selectors
     if (!resolvedSelector) {
       const fallbacks = [
         selector,
@@ -160,7 +339,7 @@ class BrowserService {
     }
 
     if (!resolvedSelector) {
-      throw new Error(`Could not find element to click: "${description || selector}". Element may not exist on this page.`);
+      throw new Error(`Could not find element to click: "${description || selector}".`);
     }
 
     await this.page.waitForSelector(resolvedSelector, { timeout: 10000, visible: true });
@@ -172,21 +351,16 @@ class BrowserService {
     return { success: true, usedSelector: resolvedSelector };
   }
 
-  /**
-   * SMART Type — finds the right input field using description fallbacks
-   */
   async type(selector, text, description = null) {
     await this.ensureInitialized();
-
     Logger.info('Typing into:', selector || description, '→', text);
 
     this.broadcast('action', {
       action: 'type',
       selector: selector,
-      message: `Typing "${text}" into: ${description || selector}`
+      message: `Typing into: ${description || selector}`
     });
 
-    // Try the provided selector first
     let resolvedSelector = selector;
     if (selector) {
       const valid = await validateSelector(this.page, selector);
@@ -196,7 +370,6 @@ class BrowserService {
       }
     }
 
-    // Fallback: fuzzy search by description
     if (!resolvedSelector && description) {
       resolvedSelector = await findBestSelector(this.page, description, 'input');
       if (resolvedSelector) {
@@ -204,11 +377,12 @@ class BrowserService {
       }
     }
 
-    // Fallback: try common input selectors
     if (!resolvedSelector) {
       const fallbacks = [
         'input[type="search"]',
         'input[type="text"]',
+        'input[type="email"]',
+        'input[type="password"]',
         'textarea',
         'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="checkbox"]):not([type="radio"])'
       ];
@@ -233,16 +407,23 @@ class BrowserService {
     await this.page.keyboard.press('A');
     await this.page.keyboard.up('Control');
     await this.page.keyboard.press('Backspace');
-    await this.page.type(resolvedSelector, text, { delay: 50 });
+
+    const shouldPressEnter = text.endsWith('\n') || text.endsWith('\r\n');
+    const cleanText = shouldPressEnter ? text.replace(/[\r\n]+$/, '') : text;
+
+    await this.page.type(resolvedSelector, cleanText, { delay: 50 });
+
+    if (shouldPressEnter) {
+      Logger.info('Pressing Enter key after typing to submit form');
+      await this.page.keyboard.press('Enter');
+      await this.sleep(1500);
+    }
 
     await this.captureAndBroadcastScreenshot();
 
     return { success: true, usedSelector: resolvedSelector };
   }
 
-  /**
-   * Scrape text content
-   */
   async scrape(selector = null) {
     await this.ensureInitialized();
     Logger.info('Scraping content:', selector || 'entire page');
@@ -261,9 +442,46 @@ class BrowserService {
     }
   }
 
-  /**
-   * Take screenshot and optionally broadcast
-   */
+  async getEmails() {
+    await this.ensureInitialized();
+    Logger.info('Fetching Gmail inbox emails');
+
+    this.broadcast('action', {
+      action: 'read_emails',
+      message: 'Reading Gmail inbox...'
+    });
+
+    const emails = await this.page.evaluate(() => {
+      const results = [];
+      const emailRows = document.querySelectorAll('tr.zA, .zA, [role="main"] tr, .email-row');
+
+      emailRows.forEach((row, index) => {
+        if (index >= 10) return;
+        const sender = (row.querySelector('.yX, .yW, [email], .sender')?.textContent || '').trim();
+        const subject = (row.querySelector('.y6, .bog, .subject, [role="link"]')?.textContent || '').trim();
+        const snippet = (row.querySelector('.y2, .xS, .snippet')?.textContent || '').trim();
+        const time = (row.querySelector('.xW, .xY, .time, .date')?.textContent || '').trim();
+
+        if (sender || subject) {
+          results.push({ sender, subject, snippet, time });
+        }
+      });
+
+      if (results.length === 0) {
+        const allEmails = document.body.innerText;
+        const lines = allEmails.split('\n').filter(l => l.includes('@') || l.trim().length > 20).slice(0, 15);
+        lines.forEach(line => {
+          results.push({ text: line.trim().substring(0, 200) });
+        });
+      }
+
+      return results;
+    });
+
+    Logger.info(`Found ${emails.length} emails`);
+    return { success: true, emails, count: emails.length };
+  }
+
   async screenshot(fullPage = false) {
     await this.ensureInitialized();
     Logger.info('Taking screenshot');
@@ -276,15 +494,9 @@ class BrowserService {
     const dataUrl = `data:image/png;base64,${screenshotB64}`;
     this.lastScreenshot = dataUrl;
 
-    return {
-      success: true,
-      screenshot: dataUrl
-    };
+    return { success: true, screenshot: dataUrl };
   }
 
-  /**
-   * Capture screenshot and broadcast as livePreview event
-   */
   async captureAndBroadcastScreenshot() {
     try {
       const result = await this.screenshot(false);
@@ -297,8 +509,62 @@ class BrowserService {
   }
 
   /**
-   * Wait for element
+   * Click at specific page coordinates (used by vision fallback)
    */
+  async clickAtCoordinates(x, y) {
+    await this.ensureInitialized();
+    Logger.info(`Vision-guided click at (${x}, ${y})`);
+
+    this.broadcast('action', {
+      action: 'vision_click',
+      coordinates: { x, y },
+      message: `Clicking at coordinates (${x}, ${y})`
+    });
+
+    await this.page.mouse.click(x, y);
+    await this.sleep(800);
+    await this.captureAndBroadcastScreenshot();
+
+    return { success: true, usedVision: true, coordinates: { x, y } };
+  }
+
+  /**
+   * Type at specific page coordinates (click first, then type)
+   */
+  async typeAtCoordinates(x, y, text) {
+    await this.ensureInitialized();
+    Logger.info(`Vision-guided type at (${x}, ${y}) → ${text}`);
+
+    this.broadcast('action', {
+      action: 'vision_type',
+      coordinates: { x, y },
+      message: `Typing "${text}" at coordinates (${x}, ${y})`
+    });
+
+    await this.page.mouse.click(x, y);
+    await this.sleep(300);
+
+    await this.page.keyboard.down('Control');
+    await this.page.keyboard.press('A');
+    await this.page.keyboard.up('Control');
+    await this.page.keyboard.press('Backspace');
+
+    const shouldPressEnter = text.endsWith('\n') || text.endsWith('\r\n');
+    const cleanText = shouldPressEnter ? text.replace(/[\r\n]+$/, '') : text;
+
+    await this.page.type(cleanText, { delay: 50 });
+
+    if (shouldPressEnter) {
+      Logger.info('Pressing Enter key after typing');
+      await this.page.keyboard.press('Enter');
+      await this.sleep(1500);
+    }
+
+    await this.captureAndBroadcastScreenshot();
+
+    return { success: true, usedVision: true, coordinates: { x, y } };
+  }
+
   async waitForElement(selector, timeout = 10000) {
     await this.ensureInitialized();
     Logger.info('Waiting for:', selector);
@@ -314,9 +580,6 @@ class BrowserService {
     return { success: true };
   }
 
-  /**
-   * Scroll page
-   */
   async scroll(direction, amount = 500) {
     await this.ensureInitialized();
     Logger.info('Scrolling:', direction);
@@ -335,9 +598,6 @@ class BrowserService {
     return { success: true };
   }
 
-  /**
-   * Upload file
-   */
   async uploadFile(selector, filePath) {
     await this.ensureInitialized();
     Logger.info('Uploading file:', filePath);
@@ -351,11 +611,13 @@ class BrowserService {
     return { success: true };
   }
 
-  /**
-   * Handle alert/popup
-   */
   async handleAlert(action, value = null) {
     Logger.info('Handling alert:', action);
+
+    if (this._dialogTimeout) {
+      clearTimeout(this._dialogTimeout);
+      this._dialogTimeout = null;
+    }
 
     if (this._pendingDialog) {
       switch (action) {
@@ -370,7 +632,6 @@ class BrowserService {
       }
       this._pendingDialog = null;
     } else {
-      // Set handler for next dialog
       this.page.once('dialog', async dialog => {
         switch (action) {
           case 'accept': await dialog.accept(value); break;
@@ -383,48 +644,35 @@ class BrowserService {
     return { success: true };
   }
 
-  /**
-   * Extract page context (interactive elements from live DOM)
-   */
+  hasPendingDialog() {
+    return !!this._pendingDialog;
+  }
+
   async getPageContext() {
     await this.ensureInitialized();
     return await extractPageContext(this.page);
   }
 
-  /**
-   * Get current page HTML
-   */
   async getPageHTML() {
     await this.ensureInitialized();
     return await this.page.content();
   }
 
-  /**
-   * Get current page text
-   */
   async getPageText() {
     await this.ensureInitialized();
     return await this.page.evaluate(() => document.body.innerText);
   }
 
-  /**
-   * Get page info
-   */
   async getPageInfo() {
     await this.ensureInitialized();
-
     const info = await this.page.evaluate(() => ({
       title: document.title,
       url: window.location.href,
       bodyText: document.body.innerText.substring(0, 1000)
     }));
-
     return info;
   }
 
-  /**
-   * Execute custom JavaScript
-   */
   async executeScript(script) {
     await this.ensureInitialized();
     Logger.info('Executing custom script');
@@ -432,67 +680,48 @@ class BrowserService {
     return { success: true, result };
   }
 
-  /**
-   * Close browser
-   */
   async close() {
     if (this.browser) {
-      Logger.info('Closing browser');
+      Logger.info('Closing browser — saving session');
+      await this.saveCookies();
       await this.browser.close();
       this.browser = null;
       this.page = null;
       this.isRunning = false;
       this.lastScreenshot = null;
-      Logger.success('Browser closed');
+      this._pendingDialog = null;
+      this._waitingForUserAction = false;
+      Logger.success('Browser closed — session saved for next run');
     }
   }
 
-  /**
-   * Get status
-   */
   getStatus() {
     return {
       isRunning: this.isRunning,
       currentUrl: this.page ? this.page.url() : null,
       downloads: this.downloads,
-      hasScreenshot: !!this.lastScreenshot
+      hasScreenshot: !!this.lastScreenshot,
+      hasSavedSession: fs.existsSync(COOKIES_PATH),
+      waitingForUser: this._waitingForUserAction
     };
   }
 
-  /**
-   * Get last screenshot for live preview
-   */
   getLastScreenshot() {
     return this.lastScreenshot;
   }
 
-  /**
-   * Ensure browser is initialized
-   */
   async ensureInitialized() {
     if (!this.isRunning || !this.browser) {
       await this.initialize();
     }
   }
 
-  /**
-   * Sleep helper
-   */
   sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  /**
-   * Broadcast message via WebSocket
-   */
   broadcast(type, data) {
-    if (global.broadcast) {
-      global.broadcast({
-        type: type,
-        ...data,
-        timestamp: Date.now()
-      });
-    }
+    broadcaster.broadcast(type, data);
   }
 }
 

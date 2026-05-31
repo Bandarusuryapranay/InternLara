@@ -8,7 +8,8 @@ module.exports = {
   
   ollama: {
     baseUrl: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
-    model: process.env.OLLAMA_MODEL || 'llama3.1:latest'
+    model: process.env.OLLAMA_MODEL || 'llama3.1:latest',
+    visionModel: process.env.OLLAMA_VISION_MODEL || 'llama3.2-vision:latest'
   },
   
   browser: {
@@ -25,5 +26,13 @@ module.exports = {
   retry: {
     maxAttempts: parseInt(process.env.MAX_RETRY_ATTEMPTS) || 3,
     delayMs: parseInt(process.env.RETRY_DELAY_MS) || 1000
+  },
+
+  dialog: {
+    autoDismissTimeout: parseInt(process.env.DIALOG_TIMEOUT_MS) || 20000
+  },
+
+  db: {
+    path: process.env.DB_PATH || './history.db'
   }
 };

@@ -189,6 +189,45 @@ body {
   gap: 6px;
 }
 
+.status-items {
+  display: flex;
+  gap: 24px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.status-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.continue-btn {
+  background: linear-gradient(135deg, #059669, #10b981);
+  color: #fff;
+  border: none;
+  padding: 6px 16px;
+  border-radius: 8px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.2s;
+  animation: pulse-glow 2s infinite;
+}
+
+.continue-btn:hover {
+  transform: scale(1.05);
+  box-shadow: 0 0 20px rgba(5, 150, 105, 0.5);
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 8px rgba(5, 150, 105, 0.3); }
+  50% { box-shadow: 0 0 20px rgba(5, 150, 105, 0.6); }
+}
+
 /* App Layout Grid */
 .app-layout {
   display: flex;
@@ -1238,4 +1277,23 @@ body {
 .template-card:hover {
   border-color: var(--accent-primary) !important;
   background: rgba(124, 58, 237, 0.05) !important;
+}
+
+/* Error Boundary */
+.error-boundary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: var(--bg-void);
+  padding: 24px;
+}
+
+.error-boundary-content {
+  text-align: center;
+  max-width: 480px;
+  padding: 48px;
+  background: var(--bg-surface-solid);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
 }

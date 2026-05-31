@@ -21,11 +21,12 @@ class ApiService {
     return response.data;
   }
 
-  async handleRetryDecision(decision, step, context) {
+  async handleRetryDecision(decision, step, context, remainingSteps) {
     const response = await axios.post(`${API_BASE_URL}/agent/retry-decision`, {
       decision,
       step,
-      context
+      context,
+      remainingSteps
     });
     return response.data;
   }
@@ -55,6 +56,11 @@ class ApiService {
 
   async stopBrowser() {
     const response = await axios.post(`${API_BASE_URL}/agent/stop`);
+    return response.data;
+  }
+
+  async continueAfterUserAction() {
+    const response = await axios.post(`${API_BASE_URL}/agent/continue`);
     return response.data;
   }
 

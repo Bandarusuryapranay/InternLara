@@ -1,6 +1,6 @@
 import React from 'react';
 
-function StatusBar({ status, onRefresh }) {
+function StatusBar({ status, onRefresh, onContinue, isWaitingForUser, visionAvailable }) {
   const getBrowserStatus = () => {
     if (!status.browser) return { icon: '⚪', text: 'Unknown', color: '#999' };
     if (status.browser.isRunning) {
@@ -34,6 +34,11 @@ function StatusBar({ status, onRefresh }) {
               {status.browser.currentUrl.length > 50 ? '...' : ''}
             </span>
           )}
+          {status.browser?.hasSavedSession && (
+            <span className="status-session" style={{ marginLeft: '8px', color: '#22d3ee', fontSize: '0.7rem' }}>
+              💾 Session saved
+            </span>
+          )}
         </div>
 
         <div className="status-item">
@@ -43,15 +48,27 @@ function StatusBar({ status, onRefresh }) {
           </span>
           {status.ollama?.currentModel && (
             <span className="status-models">
-              Model: {status.ollama.currentModel}
+              Text: {status.ollama.currentModel}
+            </span>
+          )}
+          {status.ollama?.visionAvailable && (
+            <span className="status-models" style={{ color: '#22d3ee' }}>
+              👁️ Vision ready
             </span>
           )}
         </div>
       </div>
 
-      <button className="refresh-btn" onClick={onRefresh} title="Refresh status">
-        🔄
-      </button>
+      <div className="status-actions">
+        {isWaitingForUser && (
+          <button className="continue-btn" onClick={onContinue} title="Continue after completing action">
+            ▶ Continue
+          </button>
+        )}
+        <button className="refresh-btn" onClick={onRefresh} title="Refresh status">
+          🔄
+        </button>
+      </div>
     </div>
   );
 }

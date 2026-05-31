@@ -1,4 +1,5 @@
 const config = require('../config/config');
+const broadcaster = require('../services/broadcaster');
 
 /**
  * Retry a function with exponential backoff
@@ -12,13 +13,10 @@ async function retryWithBackoff(fn, maxAttempts = config.retry.maxAttempts, base
   
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      // Broadcast retry attempt
-      if (global.broadcast && attempt > 1) {
-        global.broadcast({
-          type: 'retry',
+      if (attempt > 1) {
+        broadcaster.broadcast('retry', {
           attempt: attempt,
-          maxAttempts: maxAttempts,
-          timestamp: Date.now()
+          maxAttempts: maxAttempts
         });
       }
       
@@ -29,16 +27,13 @@ async function retryWithBackoff(fn, maxAttempts = config.retry.maxAttempts, base
       lastError = error;
       
       if (attempt < maxAttempts) {
-        // Exponential backoff: 1s, 2s, 4s, 8s...
         const delay = baseDelay * Math.pow(2, attempt - 1);
         
-        global.broadcast && global.broadcast({
-          type: 'retry_failed',
+        broadcaster.broadcast('retry_failed', {
           attempt: attempt,
           maxAttempts: maxAttempts,
           nextRetryIn: delay,
-          error: error.message,
-          timestamp: Date.now()
+          error: error.message
         });
         
         await sleep(delay);
@@ -46,7 +41,6 @@ async function retryWithBackoff(fn, maxAttempts = config.retry.maxAttempts, base
     }
   }
   
-  // All attempts failed
   throw lastError;
 }
 

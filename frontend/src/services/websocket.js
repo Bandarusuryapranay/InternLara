@@ -6,7 +6,11 @@ class WebSocketService {
     this.maxReconnectAttempts = 5;
   }
 
-  connect(url = 'ws://localhost:5000') {
+  connect(url) {
+    if (!url) {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      url = `${protocol}//${window.location.host}`;
+    }
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       return;
     }
